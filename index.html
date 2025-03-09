@@ -1,0 +1,921 @@
+`<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cow Simulator</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #8FBC8F;
+            font-family: Arial, sans-serif;
+        }
+        #gameCanvas {
+            display: block;
+        }
+        #hud {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-size: 18px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        #health {
+            margin-bottom: 5px;
+        }
+        .health-bar {
+            width: 200px;
+            height: 20px;
+            background-color: #333;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .health-fill {
+            height: 100%;
+            background-color: #4CAF50;
+            transition: width 0.3s;
+        }
+        #score {
+            margin-top: 10px;
+        }
+        .instructions {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        #gameOver {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+            display: none;
+        }
+        #restartButton {
+            margin-top: 15px;
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            border: none;
+            border-radius: 5px;
+            color: white;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        #restartButton:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="hud">
+        <div id="health">Health:</div>
+        <div class="health-bar">
+            <div class="health-fill" id="healthFill"></div>
+        </div>
+        <div id="score">Score: 0</div>
+    </div>
+    <div id="soundControls">
+        <span>Sound:</span>
+        <button id="soundToggle">ON</button>
+    </div>
+    <div class="instructions">
+        <p>WASD or Arrow Keys to move the cow | SPACE to shake off calves</p>
+        <p>Gold feed = Speed boost | Purple toxic grass = Slows you down</p>
+    </div>
+    <div id="gameOver">
+        <h2>Game Over!</h2>
+        <p id="finalScore">Score: 0</p>
+        <button id="restartButton">Play Again</button>
+    </div>
+
+    <script>
+        // Audio management system
+        const soundEnabled = {
+            value: true
+        };
+        
+        // Sound effects - Using actual web URLs for sounds
+        const audio = {
+            // Adult cow sounds
+            cowMoo: new Audio("sounds/cowMoo.wav"),
+            cowPanic: new Audio("sounds/cowPanic.wav"),
+            cowEat: new Audio("sounds/cowEat.wav"),
+            // Calf sounds
+            calfMoo1: new Audio("sounds/calfMoo1.wav"),
+            calfMoo2: new Audio("sounds/calfMoo2.wav"),
+            // Power-up sounds
+            powerupSpawn: new Audio("sounds/powerUpSpawn.wav"),
+            powerupCollect: new Audio("sounds/powerUpCollect.wav"),
+            toxicCollect: new Audio("sounds/toxicCollect.wav"),
+            shake: new Audio("sounds/shake.wav")
+        };
+        
+        // Load all audio files
+        function preloadAudio() {
+            for (const key in audio) {
+                if (audio.hasOwnProperty(key)) {
+                    audio[key].load();
+                    audio[key].volume = 0.4; // Set default volume
+                }
+            }
+            console.log("Audio preloaded");
+        }
+        preloadAudio();
+        
+        // Play sound with built-in throttling
+        const soundTimers = {};
+        function playSound(name, minInterval = 1000) {
+            if (!soundEnabled.value) return;
+            
+            const now = Date.now();
+            if (!soundTimers[name] || now - soundTimers[name] > minInterval) {
+                soundTimers[name] = now;
+                try {
+                    // Create a new audio element to allow overlapping sounds
+                    const sound = new Audio(audio[name].src);
+                    sound.volume = 0.4;
+                    sound.play()
+                        .catch(err => console.log('Audio play failed:', err));
+                } catch (error) {
+                    console.log('Sound play error:', error);
+                }
+            }
+        }
+        
+        // Sound toggle handler
+        document.getElementById('soundToggle').addEventListener('click', () => {
+            soundEnabled.value = !soundEnabled.value;
+            document.getElementById('soundToggle').textContent = soundEnabled.value ? 'ON' : 'OFF';
+            
+            // Play a test sound when turning on
+            if (soundEnabled.value) {
+                playSound('powerupSpawn');
+            }
+        });
+        
+        // Canvas setup
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // Game variables
+        let score = 0;
+        let gameOver = false;
+        let spawnTimer = 0;
+        let powerupTimer = 300; // Start with some progress to spawn first powerup sooner
+        const SPAWN_INTERVAL = 300; // Spawn a new calf every 5 seconds (60fps * 5)
+        const MAX_CALVES = 50; // Maximum number of calves allowed
+        const POWERUP_SPAWN_INTERVAL = 300; // Spawn powerups every 5 seconds (reduced from 10)
+        const healthFill = document.getElementById('healthFill');
+        const scoreElement = document.getElementById('score');
+        const finalScoreElement = document.getElementById('finalScore');
+        const gameOverScreen = document.getElementById('gameOver');
+
+        // Player (mother cow)
+        const player = {
+            x: canvas.width / 2,
+            y: canvas.height / 2,
+            radius: 25,
+            baseSpeed: 5,
+            speed: 5,
+            health: 100,
+            color: '#8B4513',
+            direction: 0, // For rotation
+            shakeCooldown: 0,
+            isShaking: false,
+            shakeTime: 0,
+            isPoisoned: false,
+            poisonTime: 0,
+            isBoosted: false,
+            boostTime: 0
+        };
+
+        // Calves
+        const calves = [];
+        const CALF_COUNT = 5;
+
+        // Grass (food) and powerups
+        const grassPatches = [];
+        const GRASS_COUNT = 15;
+        const powerups = []; // For special items (toxic grass and feed)
+
+        // Create initial calves
+        for (let i = 0; i < CALF_COUNT; i++) {
+            createCalf();
+        }
+
+        // Create initial grass patches
+        for (let i = 0; i < GRASS_COUNT; i++) {
+            createGrass();
+        }
+
+        // Movement controls
+        const keys = {
+            w: false,
+            a: false,
+            s: false,
+            d: false,
+            ArrowUp: false,
+            ArrowLeft: false,
+            ArrowDown: false,
+            ArrowRight: false,
+            ' ': false  // Space for shaking
+        };
+
+        // Event listeners
+        window.addEventListener('keydown', (e) => {
+            if (keys[e.key] !== undefined) {
+                keys[e.key] = true;
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (keys[e.key] !== undefined) {
+                keys[e.key] = false;
+            }
+        });
+
+        document.getElementById('restartButton').addEventListener('click', restartGame);
+
+        // Create a calf
+        function createCalf() {
+            // Position calves away from the player initially
+            let x, y;
+            do {
+                x = Math.random() * canvas.width;
+                y = Math.random() * canvas.height;
+            } while (Math.hypot(x - player.x, y - player.y) < 200);
+
+            calves.push({
+                x: x,
+                y: y,
+                radius: 15,
+                speed: 2.5 + Math.random(),
+                color: '#A52A2A',
+                isAttached: false,
+                attachAngle: 0,
+                isStunned: false,
+                stunTime: 0,
+                soundTimer: 0 // Track when this calf last made a sound
+            });
+            
+            // Play a calf moo sound when new calf appears
+            if (Math.random() < 0.5) {
+                playSound('calfMoo1', 500);
+            }
+        }
+
+        function createGrass() {
+            grassPatches.push({
+                x: Math.random() * canvas.width,
+                y: Math.random() * canvas.height,
+                radius: 10,
+                color: '#32CD32'
+            });
+        }
+
+        // Create a powerup (toxic grass or feed)
+        function createPowerup() {
+            // Ensure we get a good mix of both types
+            // Forced to be toxic if the last 3 were all feed
+            let lastPowerupsWereFeed = (powerups.length >= 3) && 
+                powerups.slice(-3).every(p => p.type === 'feed');
+            
+            // Either force toxic or use normal probability
+            const type = lastPowerupsWereFeed ? 'toxic' : (Math.random() < 0.4 ? 'toxic' : 'feed');
+            
+            // Log for debugging
+            console.log(`Created ${type} powerup`);
+            
+            powerups.push({
+                x: Math.random() * (canvas.width - 100) + 50, // Keep away from edges
+                y: Math.random() * (canvas.height - 100) + 50,
+                radius: 15,
+                type: type,
+                color: type === 'toxic' ? '#9932CC' : '#FFD700', // Purple for toxic, gold for feed
+                lifespan: 600 // 10 seconds at 60fps
+            });
+            
+            // Play spawn sound
+            playSound('powerupSpawn', 300);
+        }
+        
+        function handleMovement() {
+            // Update powerup/poison effects
+            if (player.isPoisoned) {
+                player.poisonTime--;
+                if (player.poisonTime <= 0) {
+                    player.isPoisoned = false;
+                    player.speed = player.baseSpeed;
+                }
+            }
+            
+            if (player.isBoosted) {
+                player.boostTime--;
+                if (player.boostTime <= 0) {
+                    player.isBoosted = false;
+                    player.speed = player.baseSpeed;
+                }
+            }
+            
+            // Calculate movement direction
+            let dx = 0;
+            let dy = 0;
+
+            if (keys.w || keys.ArrowUp) dy -= 1;
+            if (keys.s || keys.ArrowDown) dy += 1;
+            if (keys.a || keys.ArrowLeft) dx -= 1;
+            if (keys.d || keys.ArrowRight) dx += 1;
+
+            // Normalize diagonal movement
+            if (dx !== 0 && dy !== 0) {
+                const length = Math.sqrt(dx * dx + dy * dy);
+                dx /= length;
+                dy /= length;
+            }
+
+            // Set direction for drawing
+            if (dx !== 0 || dy !== 0) {
+                player.direction = Math.atan2(dy, dx);
+            }
+
+            // Move player
+            player.x += dx * player.speed;
+            player.y += dy * player.speed;
+
+            // Keep player within bounds
+            player.x = Math.max(player.radius, Math.min(canvas.width - player.radius, player.x));
+            player.y = Math.max(player.radius, Math.min(canvas.height - player.radius, player.y));
+
+            // Shake off calves
+            if (keys[' '] && player.shakeCooldown <= 0) {
+                player.isShaking = true;
+                player.shakeTime = 20; // Animation frames
+                player.shakeCooldown = 60; // Cooldown frames (1 second at 60 FPS)
+                
+                // Play shake sound
+                playSound('shake');
+
+                // Detach and stun calves
+                let anyCalvesDetached = false;
+                calves.forEach(calf => {
+                    if (calf.isAttached) {
+                        calf.isAttached = false;
+                        calf.isStunned = true;
+                        calf.stunTime = 90; // 1.5 seconds stun
+                        anyCalvesDetached = true;
+                        
+                        // Knockback effect
+                        const angle = calf.attachAngle;
+                        calf.x += Math.cos(angle) * 100;
+                        calf.y += Math.sin(angle) * 100;
+                    }
+                });
+                
+                // Play additional cow sound if any calves were detached
+                if (anyCalvesDetached) {
+                    playSound('cowMoo');
+                }
+            }
+
+            // Cooldown timer
+            if (player.shakeCooldown > 0) {
+                player.shakeCooldown--;
+            }
+
+            // Shake animation
+            if (player.isShaking) {
+                player.shakeTime--;
+                if (player.shakeTime <= 0) {
+                    player.isShaking = false;
+                }
+            }
+        }
+
+        function updateCalves() {
+            // Spawn new calves over time
+            spawnTimer++;
+            if (spawnTimer >= SPAWN_INTERVAL && calves.length < MAX_CALVES) {
+                createCalf();
+                spawnTimer = 0;
+                
+                // Make spawning more frequent as score increases
+                // (max frequency is every 2 seconds at high scores)
+                const minInterval = 120; // 2 seconds at 60fps
+                const newInterval = Math.max(minInterval, SPAWN_INTERVAL - Math.floor(score / 200) * 30);
+                if (newInterval < SPAWN_INTERVAL) {
+                    spawnTimer = SPAWN_INTERVAL - newInterval;
+                }
+            }
+
+            // Random calf sounds
+            if (Math.random() < 0.005 && calves.length > 0) {
+                const soundType = Math.random() < 0.5 ? 'calfMoo1' : 'calfMoo2';
+                playSound(soundType, 2000);
+            }
+
+            calves.forEach(calf => {
+                if (calf.isStunned) {
+                    calf.stunTime--;
+                    if (calf.stunTime <= 0) {
+                        calf.isStunned = false;
+                    }
+                    return;
+                }
+
+                if (calf.isAttached) {
+                    // Follow the player at a fixed distance
+                    calf.x = player.x + Math.cos(calf.attachAngle) * (player.radius + calf.radius);
+                    calf.y = player.y + Math.sin(calf.attachAngle) * (player.radius + calf.radius);
+                    
+                    // Drain health
+                    player.health -= 0.1;
+                    
+                    // Cow panic sound when health is draining
+                    if (Math.random() < 0.01) {
+                        playSound('cowPanic', 3000);
+                    }
+                } else {
+                    // Move towards player
+                    const dx = player.x - calf.x;
+                    const dy = player.y - calf.y;
+                    const distance = Math.hypot(dx, dy);
+                    
+                    if (distance > 0) {
+                        calf.x += (dx / distance) * calf.speed;
+                        calf.y += (dy / distance) * calf.speed;
+                    }
+
+                    // Check if calf reached player
+                    if (distance < player.radius + calf.radius + 5) {
+                        calf.isAttached = true;
+                        calf.attachAngle = Math.atan2(dy, dx);
+                        
+                        // Play cow panic sound when a calf attaches
+                        playSound('cowPanic');
+                    }
+                }
+            });
+        }
+
+        function checkGrassCollision() {
+            // Regular grass
+            for (let i = grassPatches.length - 1; i >= 0; i--) {
+                const grass = grassPatches[i];
+                const distance = Math.hypot(player.x - grass.x, player.y - grass.y);
+                
+                if (distance < player.radius + grass.radius) {
+                    // Eat grass: increase health, score, remove patch
+                    player.health = Math.min(100, player.health + 5);
+                    score += 10;
+                    scoreElement.textContent = `Score: ${score}`;
+                    grassPatches.splice(i, 1);
+                    
+                    // Play eating sound
+                    playSound('cowEat', 500);
+                    
+                    // Create new grass patch
+                    createGrass();
+                }
+            }
+            
+            // Check powerups collision
+            for (let i = powerups.length - 1; i >= 0; i--) {
+                const powerup = powerups[i];
+                const distance = Math.hypot(player.x - powerup.x, player.y - powerup.y);
+                
+                if (distance < player.radius + powerup.radius) {
+                    // Consume powerup
+                    if (powerup.type === 'toxic') {
+                        // Toxic grass: slow down
+                        player.isPoisoned = true;
+                        player.poisonTime = 300; // 5 seconds of slowness
+                        player.speed = player.baseSpeed * 0.5; // Reduce speed by half
+                        
+                        // Play toxic collect sound
+                        playSound('toxicCollect');
+                        
+                        // Cancel boost if active
+                        player.isBoosted = false;
+                        player.boostTime = 0;
+                    } else {
+                        // Feed: speed boost
+                        player.isBoosted = true;
+                        player.boostTime = 240; // 4 seconds of boost
+                        player.speed = player.baseSpeed * 1.5; // 50% speed boost
+                        
+                        // Play powerup collect sound
+                        playSound('powerupCollect');
+                        
+                        // Cancel poison if active
+                        player.isPoisoned = false;
+                        player.poisonTime = 0;
+                    }
+                    
+                    powerups.splice(i, 1);
+                }
+            }
+        }
+
+        function updateHealth() {
+            // Update health bar
+            healthFill.style.width = `${player.health}%`;
+            
+            // Check game over
+            if (player.health <= 0) {
+                gameOver = true;
+                finalScoreElement.textContent = `Score: ${score}`;
+                gameOverScreen.style.display = 'block';
+                
+                // Play game over sound
+                playSound('cowPanic');
+            }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw grass
+            grassPatches.forEach(grass => {
+                ctx.beginPath();
+                ctx.arc(grass.x, grass.y, grass.radius, 0, Math.PI * 2);
+                ctx.fillStyle = grass.color;
+                ctx.fill();
+                
+                // Add detail to grass
+                ctx.beginPath();
+                ctx.moveTo(grass.x - grass.radius, grass.y);
+                ctx.lineTo(grass.x - 2, grass.y - grass.radius - 5);
+                ctx.lineTo(grass.x + 2, grass.y - grass.radius - 3);
+                ctx.lineTo(grass.x + grass.radius, grass.y);
+                ctx.fillStyle = '#228B22';
+                ctx.fill();
+            });
+            
+            // Draw powerups (draw first to ensure they appear under the player)
+            powerups.forEach(powerup => {
+                // Draw base circle
+                ctx.beginPath();
+                ctx.arc(powerup.x, powerup.y, powerup.radius, 0, Math.PI * 2);
+                ctx.fillStyle = powerup.color;
+                ctx.fill();
+                
+                // Add stroke to make it more visible
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                // Add distinctive features based on type
+                if (powerup.type === 'toxic') {
+                    // Toxic symbol
+                    ctx.fillStyle = 'white';
+                    
+                    // Draw skull (simplified)
+                    // Skull face
+                    ctx.beginPath();
+                    ctx.arc(powerup.x, powerup.y - 2, powerup.radius * 0.4, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // Eyes
+                    ctx.fillStyle = powerup.color;
+                    ctx.beginPath();
+                    ctx.arc(powerup.x - 3, powerup.y - 3, 2, 0, Math.PI * 2);
+                    ctx.arc(powerup.x + 3, powerup.y - 3, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // Cross bones
+                    ctx.beginPath();
+                    ctx.moveTo(powerup.x - 7, powerup.y + 5);
+                    ctx.lineTo(powerup.x + 7, powerup.y + 5);
+                    ctx.lineWidth = 3;
+                    ctx.strokeStyle = 'white';
+                    ctx.stroke();
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(powerup.x, powerup.y);
+                    ctx.lineTo(powerup.x, powerup.y + 10);
+                    ctx.stroke();
+                } else {
+                    // Feed icon (hay bale)
+                    ctx.fillStyle = '#CD853F'; // Hay color
+                    ctx.fillRect(powerup.x - powerup.radius * 0.6, powerup.y - powerup.radius * 0.3, powerup.radius * 1.2, powerup.radius * 0.6);
+                    
+                    // Draw hay lines
+                    ctx.strokeStyle = '#8B4513';
+                    ctx.lineWidth = 1;
+                    for (let i = 0; i < 3; i++) {
+                        ctx.beginPath();
+                        ctx.moveTo(powerup.x - powerup.radius * 0.5, powerup.y - powerup.radius * 0.2 + i * powerup.radius * 0.2);
+                        ctx.lineTo(powerup.x + powerup.radius * 0.5, powerup.y - powerup.radius * 0.2 + i * powerup.radius * 0.2);
+                        ctx.stroke();
+                    }
+                }
+                
+                // Fade out animation near the end of lifespan
+                if (powerup.lifespan < 60) {
+                    // Flash effect for last second
+                    if (powerup.lifespan % 10 < 5) {
+                        ctx.strokeStyle = 'white';
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        ctx.arc(powerup.x, powerup.y, powerup.radius + 2, 0, Math.PI * 2);
+                        ctx.stroke();
+                    }
+                }
+            });
+            
+            // Draw player (cow)
+            ctx.save();
+            ctx.translate(player.x, player.y);
+            ctx.rotate(player.direction);
+            
+            // Draw effect aura based on status
+            if (player.isPoisoned) {
+                // Poison aura
+                ctx.beginPath();
+                ctx.arc(0, 0, player.radius + 5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(153, 50, 204, 0.3)';
+                ctx.fill();
+            } else if (player.isBoosted) {
+                // Speed boost aura
+                ctx.beginPath();
+                ctx.arc(0, 0, player.radius + 5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255, 215, 0, 0.3)';
+                ctx.fill();
+                
+                // Add motion lines for speed effect
+                ctx.strokeStyle = 'rgba(255, 215, 0, 0.7)';
+                ctx.lineWidth = 2;
+                for (let i = 0; i < 6; i++) {
+                    const angle = Math.PI + (i * Math.PI / 3);
+                    ctx.beginPath();
+                    ctx.moveTo(
+                        Math.cos(angle) * player.radius,
+                        Math.sin(angle) * player.radius
+                    );
+                    ctx.lineTo(
+                        Math.cos(angle) * (player.radius + 15),
+                        Math.sin(angle) * (player.radius + 15)
+                    );
+                    ctx.stroke();
+                }
+            }
+            
+            // Cow body
+            ctx.fillStyle = player.color;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, player.radius, player.radius * 0.7, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Display calf count near player (small indicator)
+            ctx.fillStyle = 'white';
+            ctx.font = '10px Arial';
+            ctx.fillText(`${calves.length}/${MAX_CALVES} calves`, -15, -player.radius - 5);
+            
+            // Show status effects
+            if (player.isPoisoned) {
+                ctx.fillStyle = '#9932CC';
+                ctx.font = '10px Arial';
+                ctx.fillText('POISONED!', -15, -player.radius - 18);
+            } else if (player.isBoosted) {
+                ctx.fillStyle = '#FFD700';
+                ctx.font = '10px Arial';
+                ctx.fillText('SPEED BOOST!', -20, -player.radius - 18);
+            }
+            
+            // Head
+            ctx.beginPath();
+            ctx.ellipse(player.radius * 0.7, 0, player.radius * 0.5, player.radius * 0.3, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Ears
+            ctx.beginPath();
+            ctx.ellipse(player.radius * 0.7, -player.radius * 0.4, player.radius * 0.2, player.radius * 0.1, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.beginPath();
+            ctx.ellipse(player.radius * 0.7, player.radius * 0.4, player.radius * 0.2, player.radius * 0.1, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Eyes
+            ctx.fillStyle = 'white';
+            ctx.beginPath();
+            ctx.arc(player.radius * 1, -player.radius * 0.15, player.radius * 0.1, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Pupils
+            ctx.fillStyle = 'black';
+            ctx.beginPath();
+            ctx.arc(player.radius * 1.05, -player.radius * 0.15, player.radius * 0.05, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Spots (if not shaking)
+            if (!player.isShaking) {
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.ellipse(-player.radius * 0.3, -player.radius * 0.2, player.radius * 0.3, player.radius * 0.2, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.beginPath();
+                ctx.ellipse(player.radius * 0.2, player.radius * 0.3, player.radius * 0.25, player.radius * 0.15, 0, 0, Math.PI * 2);
+                ctx.fill();
+            } else {
+                // Shake animation - draw motion lines
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
+                ctx.lineWidth = 3;
+                
+                for (let i = 0; i < 8; i++) {
+                    const angle = i * Math.PI / 4;
+                    ctx.beginPath();
+                    ctx.moveTo(0, 0);
+                    ctx.lineTo(Math.cos(angle) * player.radius * 1.5, Math.sin(angle) * player.radius * 1.5);
+                    ctx.stroke();
+                }
+            }
+            
+            ctx.restore();
+            
+            // Draw calves
+            calves.forEach(calf => {
+                ctx.save();
+                ctx.translate(calf.x, calf.y);
+                
+                if (!calf.isAttached) {
+                    // Calculate direction towards player for non-attached calves
+                    const dx = player.x - calf.x;
+                    const dy = player.y - calf.y;
+                    const angle = Math.atan2(dy, dx);
+                    ctx.rotate(angle);
+                } else {
+                    // Use attach angle for attached calves
+                    ctx.rotate(calf.attachAngle);
+                }
+                
+                // Calf body
+                ctx.fillStyle = calf.isStunned ? 'rgba(165, 42, 42, 0.5)' : calf.color;
+                ctx.beginPath();
+                ctx.ellipse(0, 0, calf.radius, calf.radius * 0.7, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Head
+                ctx.beginPath();
+                ctx.ellipse(calf.radius * 0.6, 0, calf.radius * 0.4, calf.radius * 0.25, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Eyes
+                ctx.fillStyle = 'white';
+                ctx.beginPath();
+                ctx.arc(calf.radius * 0.8, -calf.radius * 0.1, calf.radius * 0.1, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Pupils
+                ctx.fillStyle = 'black';
+                ctx.beginPath();
+                ctx.arc(calf.radius * 0.85, -calf.radius * 0.1, calf.radius * 0.05, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Stunned effect
+                if (calf.isStunned) {
+                    ctx.strokeStyle = 'yellow';
+                    ctx.lineWidth = 2;
+                    
+                    // Draw stars around stunned calf
+                    for (let i = 0; i < 3; i++) {
+                        const starX = Math.sin(Date.now() * 0.01 + i * 2) * calf.radius * 1.5;
+                        const starY = Math.cos(Date.now() * 0.01 + i * 2) * calf.radius * 1.5;
+                        
+                        ctx.beginPath();
+                        for (let j = 0; j < 5; j++) {
+                            const angle = j * Math.PI * 2 / 5 - Math.PI / 2;
+                            const length = j % 2 === 0 ? calf.radius * 0.3 : calf.radius * 0.15;
+                            const x = starX + Math.cos(angle) * length;
+                            const y = starY + Math.sin(angle) * length;
+                            
+                            if (j === 0) {
+                                ctx.moveTo(x, y);
+                            } else {
+                                ctx.lineTo(x, y);
+                            }
+                        }
+                        ctx.closePath();
+                        ctx.stroke();
+                    }
+                }
+                
+                ctx.restore();
+            });
+        }
+
+        function updatePowerups() {
+            // Spawn new powerups periodically
+            powerupTimer++;
+            if (powerupTimer >= POWERUP_SPAWN_INTERVAL) {
+                createPowerup();
+                powerupTimer = 0;
+                
+                // Debug: Check how many powerups exist
+                console.log(`Total powerups: ${powerups.length}`);
+                const toxicCount = powerups.filter(p => p.type === 'toxic').length;
+                const feedCount = powerups.filter(p => p.type === 'feed').length;
+                console.log(`Types: ${toxicCount} toxic, ${feedCount} feed`);
+            }
+            
+            // Update powerup lifespans
+            for (let i = powerups.length - 1; i >= 0; i--) {
+                powerups[i].lifespan--;
+                if (powerups[i].lifespan <= 0) {
+                    powerups.splice(i, 1);
+                }
+            }
+        }
+        
+        // Game loop
+        function gameLoop() {
+            if (!gameOver) {
+                handleMovement();
+                updateCalves();
+                updatePowerups();
+                checkGrassCollision();
+                updateHealth();
+                draw();
+            }
+            requestAnimationFrame(gameLoop);
+        }
+
+        function restartGame() {
+            // Reset game state
+            player.x = canvas.width / 2;
+            player.y = canvas.height / 2;
+            player.health = 100;
+            player.speed = player.baseSpeed;
+            player.isPoisoned = false;
+            player.isBoosted = false;
+            score = 0;
+            spawnTimer = 0;
+            powerupTimer = 0;
+            scoreElement.textContent = `Score: ${score}`;
+            
+            // Clear and recreate calves
+            calves.length = 0;
+            for (let i = 0; i < CALF_COUNT; i++) {
+                createCalf();
+            }
+            
+            // Clear and recreate grass
+            grassPatches.length = 0;
+            for (let i = 0; i < GRASS_COUNT; i++) {
+                createGrass();
+            }
+            
+            // Clear powerups
+            powerups.length = 0;
+            
+            // Play restart sound
+            playSound('cowMoo');
+            
+            // Hide game over screen
+            gameOverScreen.style.display = 'none';
+            gameOver = false;
+        }
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+
+        // Debug function for sound testing
+        function testSounds() {
+            const sounds = ['cowMoo', 'cowPanic', 'cowEat', 'calfMoo1', 'powerupSpawn', 'powerupCollect', 'toxicCollect', 'shake'];
+            let index = 0;
+            
+            const testInterval = setInterval(() => {
+                if (index >= sounds.length) {
+                    clearInterval(testInterval);
+                    return;
+                }
+                
+                const soundName = sounds[index];
+                console.log(`Testing sound: ${soundName}`);
+                playSound(soundName);
+                index++;
+            }, 1000);
+        }
+        
+        // Optional: Uncomment to test all sounds when the game loads
+        // setTimeout(testSounds, 1000);
+
+        // Start the game
+        gameLoop();
+    </script>
+</body>
+</html>
